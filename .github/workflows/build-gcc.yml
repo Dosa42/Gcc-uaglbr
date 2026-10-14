@@ -1,0 +1,104 @@
+name: Build GCC
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - '**/*.md'
+      - 'gcc/doc/**'
+      - 'maintainer-scripts/**'
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'gcc/doc/**'
+      - 'maintainer-scripts/**'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'quick: single-stage build; bootstrap: three stages with comparison'
+        type: choice
+        options: [quick, bootstrap]
+        default: quick
+      tests:
+        description: 'selected tests or full C/C++ and libstdc++ testsuites'
+        type: choice
+        options: [selected, full]
+        default: selected
+      c_tests:
+        description: 'One DejaGnu selector, e.g. dg.exp=pr12345*.c'
+        type: string
+        default: 'dg.exp=inline*.c'
+      cxx_tests:
+        description: 'One DejaGnu selector, e.g. dg.exp=template/explicit*.C'
+        type: string
+        default: 'dg.exp=template/explicit*.C'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gcc-build-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Linux x86_64 C/C++ compiler
+    # Draft PRs run Validate CI only; mark ready to start a compiler build.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    defaults:
+      run:
+        shell: bash
+    env:
+      GCC_BUILD_MODE: ${{ inputs.mode || 'quick' }}
+      GCC_TEST_SCOPE: ${{ inputs.tests || 'selected' }}
+      GCC_C_TESTS: ${{ inputs.c_tests || 'dg.exp=inline*.c' }}
+      GCC_CXX_TESTS: ${{ inputs.cxx_tests || 'dg.exp=template/explicit*.C' }}
+      GCC_JOBS: '4'
+      GCC_TEST_JOBS: '2'
+      LC_ALL: C.UTF-8
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Validate build options
+        run: bash .github/ci/build-gcc.sh validate
+      - name: Install build and test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential bison flex texinfo dejagnu expect tcl \
+            libgmp-dev libmpfr-dev libmpc-dev libisl-dev zlib1g-dev \
+            libzstd-dev python3 python3-pytest
+      - name: Configure C and C++ compiler
+        run: bash .github/ci/build-gcc.sh configure
+      - name: Build compiler and runtime libraries
+        run: bash .github/ci/build-gcc.sh build
+      - name: Run GCC regression tests
+        run: bash .github/ci/build-gcc.sh test
+      - name: Install, smoke-test and package compiler
+        run: bash .github/ci/build-gcc.sh package
+      - name: Collect diagnostic logs
+        if: always()
+        run: bash .github/ci/build-gcc.sh collect
+      - name: Upload build and test reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gcc-reports-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-results/
+          retention-days: 14
+          if-no-files-found: warn
+      - name: Upload compiled GCC
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gcc-linux-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-packages/
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error

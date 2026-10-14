@@ -1,0 +1,44 @@
+name: Validate CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/**']
+  push:
+    branches: [main]
+    paths: ['.github/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check shell scripts and result validation
+        run: |
+          bash -n .github/ci/build-gcc.sh
+          shellcheck .github/ci/build-gcc.sh
+          python3 -m unittest discover -s .github/ci -p 'test_*.py' -v
+          bash .github/ci/build-gcc.sh validate
+      - name: Check workflow syntax with actionlint
+        env:
+          ACTIONLINT_VERSION: '1.7.12'
+        run: |
+          set -euo pipefail
+          tool_dir="$RUNNER_TEMP/actionlint"
+          mkdir -p "$tool_dir"
+          cd "$tool_dir"
+          asset="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          release="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}"
+          curl --fail --location --retry 3 "$release/$asset" --output "$asset"
+          curl --fail --location --retry 3 "$release/actionlint_${ACTIONLINT_VERSION}_checksums.txt" --output checksums.txt
+          grep "  $asset\$" checksums.txt | sha256sum --check --strict
+          tar -xzf "$asset" actionlint
+          cd "$GITHUB_WORKSPACE"
+          "$tool_dir/actionlint" .github/workflows/*.yml
