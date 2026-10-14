@@ -1,0 +1,44 @@
+name: Import GCC source snapshot
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/import-gcc-snapshot.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: import-gcc-snapshot
+  cancel-in-progress: false
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+      - name: Fetch and verify exact GCC snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/gcc-source"
+          git init "$source_dir"
+          git -C "$source_dir" fetch --depth=1 https://gcc.gnu.org/git/gcc.git 5f39942ffd6ad0ec21126d172ea883e3a3589dfc
+          git -C "$source_dir" checkout --detach FETCH_HEAD
+          test "$(git -C "$source_dir" rev-parse HEAD)" = 5f39942ffd6ad0ec21126d172ea883e3a3589dfc
+          test "$(git -C "$source_dir" rev-parse 'HEAD^{tree}')" = e71d3f50e870820a3223df5bcac50c90860d6a4d
+          test "$(git -C "$source_dir" ls-files | wc -l)" -eq 163513
+          rm -rf "$source_dir/.git"
+          cp -a "$source_dir/." "$GITHUB_WORKSPACE/"
+      - name: Commit sources and remove this one-time workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/import-gcc-snapshot.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -c core.autocrlf=false add --force --all
+          git commit -m "Import GCC source snapshot without upstream Git history" -m "Source: https://gcc.gnu.org/git/gcc.git" -m "Upstream snapshot: 5f39942ffd6ad0ec21126d172ea883e3a3589dfc"
+          git push origin HEAD:main
+          echo "Imported 163513 GCC source files." >> "$GITHUB_STEP_SUMMARY"
