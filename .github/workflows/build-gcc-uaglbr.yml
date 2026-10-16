@@ -1,0 +1,219 @@
+name: Build native GCC.UAGLBR
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - gcc/**
+      - contrib/uaglbr-gcc.patch
+      - .github/workflows/build-gcc-uaglbr.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gcc-uaglbr-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  source:
+    name: Persist native source integration
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      commit: ${{ steps.source.outputs.commit }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 1
+      - name: Apply and commit GCC source hooks
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git apply --reverse --check --unidiff-zero contrib/uaglbr-gcc.patch 2>/dev/null; then
+            echo "GCC integration is already in the source files."
+          else
+            git apply --check --unidiff-zero contrib/uaglbr-gcc.patch
+            git apply --unidiff-zero contrib/uaglbr-gcc.patch
+            git diff --check
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add gcc/gcc.cc gcc/Makefile.in
+            git commit -m 'Embed UAGLBR stages in GCC driver and native build'
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git show --stat --oneline HEAD >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build and package C/C++ native toolchain
+    needs: source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      BINUTILS_VERSION: '2.47'
+      PREFIX: ${{ github.workspace }}/install/gcc-uaglbr
+      BUILD_ROOT: ${{ runner.temp }}/gcc-uaglbr-build
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.source.outputs.commit }}
+          fetch-depth: 1
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential flex bison texinfo \
+            libgmp-dev libmpfr-dev libmpc-dev libisl-dev \
+            zlib1g-dev libzstd-dev dejagnu xz-utils curl patchelf
+          mkdir -p "$BUILD_ROOT" "$PREFIX" artifacts
+          git rev-parse HEAD | tee artifacts/source-commit.txt
+          gcc --version | head -1 | tee artifacts/bootstrap-compiler.txt
+          df -h
+      - name: Build GNU assembler, BFD and linker
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$BUILD_ROOT"
+          curl --fail --location --retry 3 \
+            "https://ftp.gnu.org/gnu/binutils/binutils-${BINUTILS_VERSION}.tar.xz" \
+            -o binutils.tar.xz
+          tar -xf binutils.tar.xz
+          mkdir binutils-build
+          cd binutils-build
+          "../binutils-${BINUTILS_VERSION}/configure" \
+            --prefix="$PREFIX" --disable-nls --disable-werror \
+            --disable-gprofng --enable-plugins --enable-deterministic-archives \
+            CFLAGS=-O2 CXXFLAGS=-O2
+          make -j"$(nproc)" 2>&1 | tee "$GITHUB_WORKSPACE/artifacts/binutils-build.log"
+          make install-strip
+      - name: Configure GCC source build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$BUILD_ROOT/gcc-build"
+          cd "$BUILD_ROOT/gcc-build"
+          "$GITHUB_WORKSPACE/configure" \
+            --prefix="$PREFIX" --program-suffix=.uaglbr \
+            --enable-languages=c,c++ --disable-bootstrap \
+            --disable-multilib --disable-nls --disable-werror \
+            --enable-checking=release --disable-libstdcxx-pch \
+            --with-gnu-as --with-gnu-ld \
+            CFLAGS=-O2 CXXFLAGS=-O2
+          mkdir -p gcc
+          for tool in as ld objcopy; do
+            ln -s "$PREFIX/bin/$tool" "gcc/$tool"
+          done
+      - name: Make full compiler and language runtimes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$BUILD_ROOT/gcc-build"
+          export PATH="$PREFIX/bin:$PATH"
+          make -j"$(nproc)" CFLAGS_FOR_TARGET=-O2 CXXFLAGS_FOR_TARGET=-O2 \
+            2>&1 | tee "$GITHUB_WORKSPACE/artifacts/gcc-build.log"
+          make install-strip \
+            2>&1 | tee "$GITHUB_WORKSPACE/artifacts/gcc-install.log"
+      - name: Make installed toolchain relocatable
+        shell: bash
+        run: |
+          set -euo pipefail
+          target=$("$PREFIX/bin/gcc.uaglbr" -dumpmachine)
+          version=$("$PREFIX/bin/gcc.uaglbr" -dumpfullversion)
+          internal="$PREFIX/libexec/gcc/$target/$version"
+          for tool in as ld objcopy; do
+            ln -sfn "../../../../bin/$tool" "$internal/$tool"
+          done
+          mkdir -p "$PREFIX/lib/host" "$PREFIX/share/gcc-uaglbr"
+          python3 - <<'PY'
+          import os, pathlib, shutil, subprocess
+          root = pathlib.Path(os.environ['PREFIX'])
+          binaries = []
+          for top in ('bin', 'libexec'):
+              for p in (root / top).rglob('*'):
+                  if p.is_symlink() or not p.is_file():
+                      continue
+                  with p.open('rb') as f:
+                      if f.read(4) != b'\x7fELF':
+                          continue
+                  binaries.append(p)
+          excluded = ('libc.so.', 'libm.so.', 'libpthread.so.', 'libdl.so.',
+                      'librt.so.', 'ld-linux', 'libresolv.so.')
+          for p in binaries:
+              result = subprocess.run(['ldd', str(p)], capture_output=True, text=True)
+              for line in result.stdout.splitlines():
+                  parts = line.split()
+                  if len(parts) >= 3 and parts[1] == '=>' and parts[2].startswith('/'):
+                      lib = pathlib.Path(parts[2])
+                      if not lib.name.startswith(excluded) and not str(lib).startswith(str(root)):
+                          shutil.copy2(lib.resolve(), root / 'lib/host' / lib.name)
+              relative = os.path.relpath(root / 'lib/host', p.parent)
+              result = subprocess.run(['patchelf', '--print-interpreter', str(p)],
+                                      capture_output=True, text=True)
+              if result.returncode == 0:
+                  subprocess.run(['patchelf', '--set-rpath', '$ORIGIN/' + relative, str(p)], check=True)
+          PY
+          cp artifacts/source-commit.txt "$PREFIX/share/gcc-uaglbr/"
+          cp COPYING3 COPYING.RUNTIME "$PREFIX/share/gcc-uaglbr/"
+          printf '%s\n' \
+            'Native x86-64 Linux C/C++ toolchain, built on Ubuntu 24.04.' \
+            'GCC driver and front ends, GNU as/ld/BFD tools, and UAGLBR runtimes are included.' \
+            'Linux glibc >= 2.39 and system C development headers/libraries are required.' \
+            'No shell wrapper, external UAGLBR executable, source files or JSON are required to compile.' \
+            'gcc.uaglbr -S input.c produces input.s.uaglbr.' \
+            'gcc.uaglbr -c input.c produces input.uaglbr.o; explicit -o names are preserved.' \
+            'Native ELF code/symbols/relocations remain alongside an encoded copy of the complete input object.' \
+            'Payload uses hexadecimal bytes transformed through the original 62-character Latin mapping.' \
+            'Assembly text uses the original raw mapping and its pre-existing Braille collision limitation.' \
+            'No SHA generation, proof verification or automatic payload execution is added.' \
+            > "$PREFIX/share/gcc-uaglbr/BUILD.txt"
+      - name: Exercise the installed compiler and ELF pipeline
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$BUILD_ROOT/smoke"
+          cd "$BUILD_ROOT/smoke"
+          cc="$PREFIX/bin/gcc.uaglbr"
+          cxx="$PREFIX/bin/g++.uaglbr"
+          "$cc" --version | tee "$GITHUB_WORKSPACE/artifacts/compiler-version.txt"
+          printf '%s\n' 'extern int offset; extern int twice(int); int calculate(int x){return twice(x)+offset;}' > unit.c
+          printf '%s\n' 'extern int calculate(int); int offset=4; int twice(int x){return 2*x;} int main(void){return calculate(3)!=10;}' > main.c
+          "$cc" -O2 -S unit.c
+          test -s unit.s.uaglbr
+          "$cc" -c unit.s.uaglbr -o unit.uaglbr.o
+          "$cc" -O2 -c main.c
+          "$cc" main.uaglbr.o unit.uaglbr.o -o application
+          ./application
+          "$PREFIX/bin/readelf" -SWr unit.uaglbr.o | tee "$GITHUB_WORKSPACE/artifacts/elf-inspection.txt"
+          "$PREFIX/bin/readelf" -SW unit.uaglbr.o | grep -F .uaglbr.payload
+          "$PREFIX/bin/nm" unit.uaglbr.o | grep -E ' T calculate$'
+          "$cc" -O2 -flto -c unit.c -o unit.lto.o
+          "$cc" -O2 -flto main.c unit.lto.o -o application-lto
+          ./application-lto
+          printf '%s\n' '#include <iostream>' '#include <stdexcept>' 'int main(){try{throw std::runtime_error("uaglbr");}catch(const std::exception& e){std::cout<<e.what()<<"\n";}return 0;}' > cpp.cc
+          "$cxx" -O2 cpp.cc -o application-cpp
+          LD_LIBRARY_PATH="$PREFIX/lib64:$PREFIX/lib:${LD_LIBRARY_PATH:-}" ./application-cpp
+          "$cc" -O2 -pipe -c unit.c -o piped.o
+          "$cc" -O2 -gsplit-dwarf -g -c unit.c -o split.o
+          "$cc" -O2 -c unit.c -o /dev/null
+          printf '%s\n' 'INSTALLED_COMPILER_CHECKS_PASSED' | tee "$GITHUB_WORKSPACE/artifacts/checks.txt"
+      - name: Package native installation and corresponding GCC source
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -C "$(dirname "$PREFIX")" -cJf artifacts/gcc-uaglbr-x86_64-linux.tar.xz "$(basename "$PREFIX")"
+          git archive --format=tar HEAD | xz -T2 > artifacts/gcc-uaglbr-source.tar.xz
+          printf '%s\n' "Source: $(git rev-parse HEAD)" \
+            'Build and installed-compiler checks completed successfully.' \
+            >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload compiler artifacts and build logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: gcc-uaglbr-x86_64-linux-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
+          compression-level: 0
