@@ -69,7 +69,7 @@ diff --git a/gcc/gcc.cc b/gcc/gcc.cc
 -   , 0, 0, 0},
 +      %{!M:%{!MM:%{!E:-o %g.s \n\
 +       %{!S:%:uaglbr-prepare(%g.s %g.s.uaglbr) \
-+         as %(asm_debug) %(asm_options) %g.s %A }\
++	 as %(asm_debug) %(asm_options) %g.s %A }\
 +       %{S:%:uaglbr-save(%g.s %{o*:%*}%{!o*:%b.s.uaglbr})}\
 +      }}}", 0, 0, 0},
 @@ -1825,2 +1819,6 @@
