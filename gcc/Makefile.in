@@ -82,6 +82,8 @@ gcc_docdir = @srcdir@/doc
 abs_srcdir = @abs_srcdir@
 abs_docdir = @abs_srcdir@/doc
 
+include $(srcdir)/uaglbr.mk
+
 # Directory where sources are, relative to here.
 top_srcdir = @top_srcdir@
 

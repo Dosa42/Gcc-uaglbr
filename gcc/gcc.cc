@@ -55,6 +55,7 @@ compilation is specified by a string called a "spec".  */
 #include "gcc-urlifier.h"
 #include "opts-diagnostic.h"
 #include "auto-profile.h" /* for AUTO_PROFILE_VERSION.  */
+#include "uaglbr-specs.h"
 
 #ifndef MATH_LIBRARY
 #define MATH_LIBRARY "m"
@@ -721,10 +722,10 @@ proper position among the other output files.  */
 #define ASM_FINAL_SPEC \
   "%{gsplit-dwarf: \n\
        objcopy --extract-dwo \
-	 %{c:%{o*:%*}%{!o*:%w%b%O}}%{!c:%U%O} \
+	 %{c:%{o*:%*}%{!o*:%w%b.uaglbr%O}}%{!c:%U%O} \
 	 %b.dwo \n\
        objcopy --strip-dwo \
-	 %{c:%{o*:%*}%{!o*:%w%b%O}}%{!c:%U%O} \
+	 %{c:%{o*:%*}%{!o*:%w%b.uaglbr%O}}%{!c:%U%O} \
     }"
 #endif
 
@@ -1242,7 +1243,8 @@ static const char *cc1plus_spec = CC1PLUS_SPEC;
 static const char *link_gcc_c_sequence_spec = LINK_GCC_C_SEQUENCE_SPEC;
 static const char *link_ssp_spec = LINK_SSP_SPEC;
 static const char *asm_spec = ASM_SPEC;
-static const char *asm_final_spec = ASM_FINAL_SPEC;
+static const char *asm_final_spec = ASM_FINAL_SPEC
+  "\n%:uaglbr-object(%{c:%{o*:%*}%{!o*:%b.uaglbr%O}}%{!c:%U%O})";
 static const char *link_spec = LINK_SPEC LIBC_LINK_SPEC;
 static const char *lib_spec = LIB_SPEC;
 static const char *link_gomp_spec = "";
@@ -1283,7 +1285,7 @@ static const char *cpp_unique_options =
  %{MMD:-MMD %{!o:%b.d}%{o*:%.d%*}}\
  %{M} %{MM} %{MF*} %{MG} %{MP} %{MQ*} %{MT*}\
  %{Mmodules} %{Mno-modules}\
- %{!E:%{!M:%{!MM:%{!MT:%{!MQ:%{MD|MMD:%{o*:-MQ %*}}}}}}}\
+ %{!E:%{!M:%{!MM:%{!MT:%{!MQ:%{MD|MMD:%{o*:-MQ %*}%{!o*:-MQ %b.uaglbr%O}}}}}}}\
  %{remap} %{%:debug-level-gt(2):-dD}\
  %{!iplugindir*:%{fplugin*:%:find-plugindir()}}\
  %{H} %C %{D*&U*&A*} %{i*} %Z %i\
@@ -1324,7 +1326,7 @@ static const char *cc1_options =
  %{-target-help:--target-help}\
  %{-version:--version}\
  %{-help=*:--help=%*}\
- %{!fsyntax-only:%{S:%W{o*}%{!o*:-o %w%b.s}}}\
+ %{!fsyntax-only:%{S:-o %g.s}}\
  %{fsyntax-only:-o %j} %{-param*}\
  %{coverage:-fprofile-arcs -ftest-coverage}\
  %{fprofile-arcs|fcondition-coverage|fpath-coverage|fprofile-generate*|coverage:\
@@ -1336,20 +1338,15 @@ static const char *asm_options =
 ASM_V_SPEC
 " %(asm_debug_option)"
 ASM_COMPRESS_DEBUG_SPEC
-"%a %Y %{c:%W{o*}%{!o*:-o %w%b%O}}%{!c:-o %d%w%u%O}";
+"%a %Y %{c:%W{o*}%{!o*:-o %w%b.uaglbr%O}}%{!c:-o %d%w%u%O}";
 
 static const char *invoke_as =
-#ifdef AS_NEEDS_DASH_FOR_PIPED_INPUT
-"%{!fwpa*:\
+"%{!fwpa*:%{!fself-test=*:\
    %{fcompare-debug=*|fdump-final-insns=*:%:compare-debug-dump-opt()}\
-   %{!S:-o %|.s |\n as %(asm_options) %|.s %A }\
-  }";
-#else
-"%{!fwpa*:\
-   %{fcompare-debug=*|fdump-final-insns=*:%:compare-debug-dump-opt()}\
-   %{!S:-o %|.s |\n as %(asm_options) %m.s %A }\
-  }";
-#endif
+   %{!S:-o %g.s \n %:uaglbr-prepare(%g.s %g.s.uaglbr) \
+     as %(asm_options) %g.s %A }\
+   %{S: \n %:uaglbr-save(%g.s %{o*:%*}%{!o*:%b.s.uaglbr})}\
+  }}";
 
 /* Some compilers have limits on line lengths, and the multilib_select
    and/or multilib_matches strings can be very long, so we build them at
@@ -1519,23 +1516,20 @@ static const struct compiler default_compilers[] =
   {"@cpp-output",
    "%{!M:%{!MM:%{!E:cc1 -fpreprocessed %i %(cc1_options) %{!fsyntax-only:%(invoke_as)}}}}", 0, 0, 0},
   {".s", "@assembler", 0, 0, 0},
+  {".s.uaglbr", "@assembler", 0, 0, 0},
   {"@assembler",
-   "%{!M:%{!MM:%{!E:%{!S:as %(asm_debug) %(asm_options) %i %A }}}}", 0, 0, 0},
+   "%{!M:%{!MM:%{!E:%{!S:%:uaglbr-load(%i %g.s) \
+    as %(asm_debug) %(asm_options) %g.s %A }}}}", 0, 0, 0},
   {".sx", "@assembler-with-cpp", 0, 0, 0},
   {".S", "@assembler-with-cpp", 0, 0, 0},
   {"@assembler-with-cpp",
-#ifdef AS_NEEDS_DASH_FOR_PIPED_INPUT
    "%(trad_capable_cpp) -lang-asm %(cpp_options) -fno-directives-only\
       %{E|M|MM:%(cpp_debug_options)}\
-      %{!M:%{!MM:%{!E:%{!S:-o %|.s |\n\
-       as %(asm_debug) %(asm_options) %|.s %A }}}}"
-#else
-   "%(trad_capable_cpp) -lang-asm %(cpp_options) -fno-directives-only\
-      %{E|M|MM:%(cpp_debug_options)}\
-      %{!M:%{!MM:%{!E:%{!S:-o %|.s |\n\
-       as %(asm_debug) %(asm_options) %m.s %A }}}}"
-#endif
-   , 0, 0, 0},
+      %{!M:%{!MM:%{!E:-o %g.s \n\
+       %{!S:%:uaglbr-prepare(%g.s %g.s.uaglbr) \
+	 as %(asm_debug) %(asm_options) %g.s %A }\
+       %{S:%:uaglbr-save(%g.s %{o*:%*}%{!o*:%b.s.uaglbr})}\
+      }}}", 0, 0, 0},
 
 #ifndef EXTRA_DEFAULT_COMPILERS
 #define EXTRA_DEFAULT_COMPILERS
@@ -1812,6 +1806,10 @@ static struct spec_list *specs = (struct spec_list *) 0;
 
 static const struct spec_function static_spec_functions[] =
 {
+  { "uaglbr-prepare", uaglbr_prepare_spec_function },
+  { "uaglbr-save", uaglbr_save_spec_function },
+  { "uaglbr-load", uaglbr_load_spec_function },
+  { "uaglbr-object", uaglbr_object_spec_function },
   { "getenv",                   getenv_spec_function },
   { "if-exists",		if_exists_spec_function },
   { "if-exists-else",		if_exists_else_spec_function },
@@ -3183,6 +3181,8 @@ find_a_program (const char *name)
       return search(path_len);
     });
 }
+
+#include "uaglbr-driver.inc"
 
 /* Ranking of prefixes in the sort list. -B prefixes are put before
    all others.  */
