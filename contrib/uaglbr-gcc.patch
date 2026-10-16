@@ -1,0 +1,94 @@
+diff --git a/gcc/gcc.cc b/gcc/gcc.cc
+--- a/gcc/gcc.cc
++++ b/gcc/gcc.cc
+@@ -63 +63,2 @@
+ #include "auto-profile.h" /* for AUTO_PROFILE_VERSION.  */
++#include "uaglbr-specs.h"
+@@ -728,8 +729,8 @@
+ #define ASM_FINAL_SPEC \
+   "%{gsplit-dwarf: \n\
+        objcopy --extract-dwo \
+-	 %{c:%{o*:%*}%{!o*:%w%b%O}}%{!c:%U%O} \
++	 %{c:%{o*:%*}%{!o*:%w%b.uaglbr%O}}%{!c:%U%O} \
+ 	 %b.dwo \n\
+        objcopy --strip-dwo \
+-	 %{c:%{o*:%*}%{!o*:%w%b%O}}%{!c:%U%O} \
++	 %{c:%{o*:%*}%{!o*:%w%b.uaglbr%O}}%{!c:%U%O} \
+     }"
+@@ -1244 +1245,2 @@
+-static const char *asm_final_spec = ASM_FINAL_SPEC;
++static const char *asm_final_spec = ASM_FINAL_SPEC
++  "\n%:uaglbr-object(%{c:%{o*:%*}%{!o*:%b.uaglbr%O}}%{!c:%U%O})";
+@@ -1285 +1287 @@
+- %{!E:%{!M:%{!MM:%{!MT:%{!MQ:%{MD|MMD:%{o*:-MQ %*}}}}}}}\
++ %{!E:%{!M:%{!MM:%{!MT:%{!MQ:%{MD|MMD:%{o*:-MQ %*}%{!o*:-MQ %b.uaglbr%O}}}}}}}\
+@@ -1330 +1332 @@
+- %{!fsyntax-only:%{S:%W{o*}%{!o*:-o %w%b.s}}}\
++ %{!fsyntax-only:%{S:-o %g.s}}\
+@@ -1343 +1345 @@
+-"%a %Y %{c:%W{o*}%{!o*:-o %w%b%O}}%{!c:-o %d%w%u%O}";
++"%a %Y %{c:%W{o*}%{!o*:-o %w%b.uaglbr%O}}%{!c:-o %d%w%u%O}";
+@@ -1345,12 +1347,7 @@
+ static const char *invoke_as =
+-#ifdef AS_NEEDS_DASH_FOR_PIPED_INPUT
+-"%{!fwpa*:\
++"%{!fwpa*:%{!fself-test=*:\
+    %{fcompare-debug=*|fdump-final-insns=*:%:compare-debug-dump-opt()}\
+-   %{!S:-o %|.s |\n as %(asm_options) %|.s %A }\
+-  }";
+-#else
+-"%{!fwpa*:\
+-   %{fcompare-debug=*|fdump-final-insns=*:%:compare-debug-dump-opt()}\
+-   %{!S:-o %|.s |\n as %(asm_options) %m.s %A }\
+-  }";
+-#endif
++   %{!S:-o %g.s \n %:uaglbr-prepare(%g.s %g.s.uaglbr) \
++     as %(asm_options) %g.s %A }\
++   %{S: \n %:uaglbr-save(%g.s %{o*:%*}%{!o*:%b.s.uaglbr})}\
++  }}";
+@@ -1520,3 +1517,5 @@
+   {".s", "@assembler", 0, 0, 0},
++  {".s.uaglbr", "@assembler", 0, 0, 0},
+   {"@assembler",
+-   "%{!M:%{!MM:%{!E:%{!S:as %(asm_debug) %(asm_options) %i %A }}}}", 0, 0, 0},
++   "%{!M:%{!MM:%{!E:%{!S:%:uaglbr-load(%i %g.s) \
++    as %(asm_debug) %(asm_options) %g.s %A }}}}", 0, 0, 0},
+@@ -1526,13 +1525,8 @@
+   {"@assembler-with-cpp",
+-#ifdef AS_NEEDS_DASH_FOR_PIPED_INPUT
+    "%(trad_capable_cpp) -lang-asm %(cpp_options) -fno-directives-only\
+       %{E|M|MM:%(cpp_debug_options)}\
+-      %{!M:%{!MM:%{!E:%{!S:-o %|.s |\n\
+-       as %(asm_debug) %(asm_options) %|.s %A }}}}"
+-#else
+-   "%(trad_capable_cpp) -lang-asm %(cpp_options) -fno-directives-only\
+-      %{E|M|MM:%(cpp_debug_options)}\
+-      %{!M:%{!MM:%{!E:%{!S:-o %|.s |\n\
+-       as %(asm_debug) %(asm_options) %m.s %A }}}}"
+-#endif
+-   , 0, 0, 0},
++      %{!M:%{!MM:%{!E:-o %g.s \n\
++       %{!S:%:uaglbr-prepare(%g.s %g.s.uaglbr) \
++         as %(asm_debug) %(asm_options) %g.s %A }\
++       %{S:%:uaglbr-save(%g.s %{o*:%*}%{!o*:%b.s.uaglbr})}\
++      }}}", 0, 0, 0},
+@@ -1825,2 +1819,6 @@
+ static const struct spec_function static_spec_functions[] =
+ {
++  { "uaglbr-prepare", uaglbr_prepare_spec_function },
++  { "uaglbr-save", uaglbr_save_spec_function },
++  { "uaglbr-load", uaglbr_load_spec_function },
++  { "uaglbr-object", uaglbr_object_spec_function },
+@@ -3205,2 +3203,4 @@
++#include "uaglbr-driver.inc"
++
+ /* Ranking of prefixes in the sort list. -B prefixes are put before
+    all others.  */
+diff --git a/gcc/Makefile.in b/gcc/Makefile.in
+--- a/gcc/Makefile.in
++++ b/gcc/Makefile.in
+@@ -95,2 +95,4 @@
+ abs_srcdir = @abs_srcdir@
+ abs_docdir = @abs_srcdir@/doc
++
++include $(srcdir)/uaglbr.mk
